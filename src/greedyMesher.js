@@ -9,9 +9,9 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
     
     // Helper function to get voxel from any position (including neighboring chunks)
     function getVoxelAt(x, y, z) {
-        // Check if within current chunk
-        if (x >= 0 && x < chunkSize && z >= 0 && z < chunkSize && y >= 0 && y < chunkHeight) {
-            return voxelGrid[x]?.[z]?.[y];
+        // Check if within current chunk (Y range -60 to +67)
+        if (x >= 0 && x < chunkSize && z >= 0 && z < chunkSize && y >= -60 && y < chunkHeight - 60) {
+            return voxelGrid[x]?.[z]?.[y + 60];
         }
         
         // Check neighboring chunks if at border
@@ -43,7 +43,7 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
                 const neighborChunk = gameInstance.chunks.get(neighborKey);
                 
                 if (neighborChunk && neighborChunk.voxelGrid) {
-                    return neighborChunk.voxelGrid[localX]?.[localZ]?.[y];
+                    return neighborChunk.voxelGrid[localX]?.[localZ]?.[y + 60];
                 }
                 // If neighbor chunk doesn't exist, assume it's the same material (to prevent seams)
                 // This will be updated when the neighbor chunk loads
@@ -89,13 +89,13 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
     }
     
     // Process all blocks (transparent and solid)
-    for (let y = 0; y < chunkHeight; y++) {
+    for (let y = -60; y < chunkHeight - 60; y++) {
         for (let x = 0; x < chunkSize; x++) {
             for (let z = 0; z < chunkSize; z++) {
                 const posKey = `${x},${y},${z}`;
                 if (processed.has(posKey)) continue;
                 
-                const voxel = voxelGrid[x]?.[z]?.[y];
+                const voxel = voxelGrid[x]?.[z]?.[y + 60];
                 if (!voxel || !voxel.material) continue;
                 
                 // Get visible faces for this voxel
@@ -112,7 +112,7 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
                     
                     const worldX = offsetX + x;
                     const worldZ = offsetZ + z;
-                    const worldY = y - 6;
+                    const worldY = y;
                     
                     cubes.push({
                         position: [worldX * blockSize, worldY * 0.5, worldZ * blockSize],
@@ -131,7 +131,7 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
                 // First expand in X direction
                 let width = 1;
                 while (x + width < chunkSize) {
-                    const nextVoxel = voxelGrid[x + width]?.[z]?.[y];
+                    const nextVoxel = voxelGrid[x + width]?.[z]?.[y + 60];
                     const nextKey = `${x + width},${y},${z}`;
                     
                     if (!nextVoxel || processed.has(nextKey) ||
@@ -148,7 +148,7 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
                 while (z + depth < chunkSize && canExpandZ) {
                     // Check entire row can expand
                     for (let dx = 0; dx < width; dx++) {
-                        const nextVoxel = voxelGrid[x + dx]?.[z + depth]?.[y];
+                        const nextVoxel = voxelGrid[x + dx]?.[z + depth]?.[y + 60];
                         const nextKey = `${x + dx},${y},${z + depth}`;
                         
                         if (!nextVoxel || processed.has(nextKey) ||
@@ -165,11 +165,11 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
                 // Now try to expand in Y direction with the established XZ rectangle
                 let height = 1;
                 let canExpandY = true;
-                while (y + height < chunkHeight && canExpandY) {
+                while (y + height < chunkHeight - 60 && canExpandY) {
                     // Check entire XZ plane can expand upward
                     for (let dx = 0; dx < width; dx++) {
                         for (let dz = 0; dz < depth; dz++) {
-                            const nextVoxel = voxelGrid[x + dx]?.[z + dz]?.[y + height];
+                            const nextVoxel = voxelGrid[x + dx]?.[z + dz]?.[y + height + 60];
                             const nextKey = `${x + dx},${y + height},${z + dz}`;
                             
                             if (!nextVoxel || processed.has(nextKey) ||
@@ -252,7 +252,7 @@ function greedyMesher(voxelGrid, chunkX, chunkZ, key, chunkSize, chunkHeight, bl
                 // Create merged cube with 3D dimensions
                 const worldX = offsetX + x + (width - 1) / 2;
                 const worldZ = offsetZ + z + (depth - 1) / 2;
-                const worldY = y - 6 + (height - 1) / 2;
+                const worldY = y + (height - 1) / 2;
                 
                 cubes.push({
                     position: [worldX * blockSize, worldY * 0.5, worldZ * blockSize],

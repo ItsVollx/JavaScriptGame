@@ -72,10 +72,11 @@ class Game {
         this.chunks = new Map();
         this.chunkSize = 16; // 16x16 blocks per chunk
         this.chunkHeight = 128; // Vertical chunk size (world height)
-        this.renderDistance = 3; // chunks
+        this.renderDistance = 2; // chunks
         this.lastChunkX = null;
         this.lastChunkZ = null;
-        this.worldSeed = Math.random() * 10000;
+        this.worldSeed = Math.floor(Math.random() * 1000000);
+        // console.log(`World Seed: ${this.worldSeed}`);
         this.blockSize = 2; // Each block is 2x2x2 units
         this.dirtyChunks = new Set(); // Track chunks that need re-rendering
         
@@ -106,15 +107,15 @@ class Game {
         this.fpsElement = document.getElementById('fps');
         
         // Generate initial chunks around spawn
-        console.log('Generating initial chunks...');
+        // console.log('Generating initial chunks...');
         this.updateChunks();
-        console.log(`Chunks loaded: ${this.chunks.size}, Cubes: ${this.cubes.length}`);
+        // console.log(`Chunks loaded: ${this.chunks.size}, Cubes: ${this.cubes.length}`);
         
         // Set player spawn on solid ground
         const spawnHeight = this.getTerrainHeightAt(0, 0);
-        this.player.position[1] = spawnHeight + 10; // Higher spawn
+        this.player.position[1] = Math.max(spawnHeight + 3, 5); // Spawn above terrain, minimum Y=5
         this.player.rotation = [0, 0]; // Look straight ahead
-        console.log(`Player spawn at height: ${this.player.position[1]}`);
+        // console.log(`Player spawn at height: ${this.player.position[1]}`);
         
         this.generateEnemies();
         
@@ -314,6 +315,124 @@ class Game {
         return n - Math.floor(n);
     }
     
+    floodFillWater(voxelGrid, chunkSize, seaLevel) {
+        // 3D BFS: seed at the FIRST empty below sea level per column, then flow DOWN first.
+        // Also traverse through existing water at sea level to reach cave openings.
+        const visited = new Set();
+        const queue = [];
+        let seeds = 0;
+        let placed = 0;
+        let logged = 0;
+        let minPlacedY = 9999;
+
+        for (let x = 0; x < chunkSize; x++) {
+            for (let z = 0; z < chunkSize; z++) {
+                // Seed ALL empty cells at or below sea level for this column
+                for (let y = seaLevel; y >= -60; y--) {
+                    const aY = y + 60;
+                    const v = voxelGrid[x] && voxelGrid[x][z] ? voxelGrid[x][z][aY] : null;
+                    if (!v) {
+                        const k = `${x},${y},${z}`;
+                        if (!visited.has(k)) { visited.add(k); queue.push([x, y, z]); seeds++; }
+                    }
+                }
+                // Also enqueue sea-level water to traverse across ocean surface
+                const seaAY = seaLevel + 60;
+                if (voxelGrid[x] && voxelGrid[x][z] && voxelGrid[x][z][seaAY] && voxelGrid[x][z][seaAY].material === Materials.WATER) {
+                    const kw = `${x},${seaLevel},${z}`;
+                    if (!visited.has(kw)) { visited.add(kw); queue.push([x, seaLevel, z]); seeds++; }
+                }
+            }
+        }
+
+        while (queue.length > 0) {
+            const [x, y, z] = queue.shift();
+            if (x < 0 || x >= chunkSize || z < 0 || z >= chunkSize || y < -60 || y > seaLevel) continue;
+            if (!voxelGrid[x] || !voxelGrid[x][z]) continue;
+            const aY = y + 60;
+            const v = voxelGrid[x][z][aY];
+
+            // Place water only into empty cells, but traverse through existing water
+            if (!v) {
+                voxelGrid[x][z][aY] = { material: Materials.WATER, color: [0.2, 0.4, 0.8], type: 'water' };
+                placed++;
+                if (y < minPlacedY) minPlacedY = y;
+                if (logged < 40 && y < 0) { console.log(`[WaterFill] placed x=${x} y=${y} z=${z}`); logged++; }
+            }
+
+            // Strong downwards priority: always try DOWN, then 4 sides; skip UP to keep flow downward
+            const down = [x, y - 1, z];
+            const sides = [
+                [x - 1, y, z], [x + 1, y, z], [x, y, z - 1], [x, y, z + 1]
+            ];
+
+            // Enqueue DOWN even when below is water (to continue falling through cavities)
+            {
+                const [nx, ny, nz] = down;
+                if (nx >= 0 && nx < chunkSize && nz >= 0 && nz < chunkSize && ny >= -60 && ny <= seaLevel) {
+                    const key = `${nx},${ny},${nz}`;
+                    if (!visited.has(key)) {
+                        const naY = ny + 60;
+                        const belowV = voxelGrid[nx] && voxelGrid[nx][nz] ? voxelGrid[nx][nz][naY] : null;
+                        if (!belowV || (belowV && belowV.material === Materials.WATER)) {
+                            visited.add(key);
+                            queue.push([nx, ny, nz]);
+                        }
+                    }
+                }
+            }
+
+            // Then enqueue sides, but only into empty or water to avoid tunneling through solids
+            for (const [nx, ny, nz] of sides) {
+                if (nx < 0 || nx >= chunkSize || nz < 0 || nz >= chunkSize) continue;
+                if (ny < -60 || ny > seaLevel) continue;
+                const key = `${nx},${ny},${nz}`;
+                if (visited.has(key)) continue;
+                const naY = ny + 60;
+                if (!voxelGrid[nx] || !voxelGrid[nx][nz]) continue;
+                const nv = voxelGrid[nx][nz][naY];
+                if (!nv || (nv.material && nv.material === Materials.WATER)) {
+                    visited.add(key);
+                    queue.push([nx, ny, nz]);
+                }
+            }
+        }
+
+        console.log(`[WaterFill] seeds=${seeds} placed=${placed} minYPlaced=${minPlacedY === 9999 ? 'n/a' : minPlacedY}`);
+    }
+    
+    isPlayerInWater() {
+        // Check if player is in water by checking cubes at player position
+        const playerRadius = 0.5;
+        const playerHeight = 1.8;
+        
+        for (let cube of this.cubes) {
+            if (cube.material && cube.material.transparent && cube.material === Materials.WATER) {
+                // Check if player overlaps with water cube
+                const cubeMinX = cube.position[0] - cube.scale[0] / 2;
+                const cubeMaxX = cube.position[0] + cube.scale[0] / 2;
+                const cubeMinY = cube.position[1] - cube.scale[1] / 2;
+                const cubeMaxY = cube.position[1] + cube.scale[1] / 2;
+                const cubeMinZ = cube.position[2] - cube.scale[2] / 2;
+                const cubeMaxZ = cube.position[2] + cube.scale[2] / 2;
+                
+                const playerMinX = this.player.position[0] - playerRadius;
+                const playerMaxX = this.player.position[0] + playerRadius;
+                const playerMinY = this.player.position[1] - playerHeight / 2;
+                const playerMaxY = this.player.position[1] + playerHeight / 2;
+                const playerMinZ = this.player.position[2] - playerRadius;
+                const playerMaxZ = this.player.position[2] + playerRadius;
+                
+                if (playerMaxX > cubeMinX && playerMinX < cubeMaxX &&
+                    playerMaxY > cubeMinY && playerMinY < cubeMaxY &&
+                    playerMaxZ > cubeMinZ && playerMinZ < cubeMaxZ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
     getVoxelAt(worldX, worldY, worldZ) {
         const chunkX = Math.floor(worldX / this.chunkSize);
         const chunkZ = Math.floor(worldZ / this.chunkSize);
@@ -496,17 +615,38 @@ class Game {
             }
         }
         
-        // Unload distant chunks
+        // Unload distant chunks more aggressively
         for (const [key, chunkData] of this.chunks.entries()) {
             const [chunkX, chunkZ] = key.split(',').map(Number);
             const dx = Math.abs(chunkX - playerChunkX);
             const dz = Math.abs(chunkZ - playerChunkZ);
             
-            if (dx > this.renderDistance + 1 || dz > this.renderDistance + 1) {
+            // Unload chunks immediately outside render distance
+            if (dx > this.renderDistance || dz > this.renderDistance) {
                 // Remove cubes from render list
                 this.cubes = this.cubes.filter(cube => cube.chunkKey !== key);
                 this.chunks.delete(key);
                 this.dirtyChunks.delete(key);
+            }
+        }
+        
+        // Limit total chunks in memory (safety limit)
+        if (this.chunks.size > 25) {
+            console.warn(`Too many chunks in memory (${this.chunks.size}), clearing oldest`);
+            let oldestKey = null;
+            let oldestTime = Date.now();
+            
+            for (const [key, chunkData] of this.chunks.entries()) {
+                if (chunkData.lastRendered < oldestTime) {
+                    oldestTime = chunkData.lastRendered;
+                    oldestKey = key;
+                }
+            }
+            
+            if (oldestKey) {
+                this.cubes = this.cubes.filter(cube => cube.chunkKey !== oldestKey);
+                this.chunks.delete(oldestKey);
+                this.dirtyChunks.delete(oldestKey);
             }
         }
         
@@ -535,38 +675,48 @@ class Game {
                 const worldX = offsetX + x;
                 const worldZ = offsetZ + z;
                 
-                // Terrain generation
+                // Multi-octave terrain generation for smooth hills
                 const noise1 = Math.sin(worldX * 0.1 + this.worldSeed) * Math.cos(worldZ * 0.1 + this.worldSeed);
                 const noise2 = Math.sin(worldX * 0.05 + this.worldSeed * 2) * Math.cos(worldZ * 0.05 + this.worldSeed * 2) * 1.5;
                 const noise3 = Math.sin(worldX * 0.02 + this.worldSeed * 3) * Math.cos(worldZ * 0.02 + this.worldSeed * 3) * 2;
+                const noise4 = Math.sin(worldX * 0.15 + this.worldSeed * 4) * Math.cos(worldZ * 0.15 + this.worldSeed * 4) * 0.5;
                 
                 const biome = this.getBiome(worldX, worldZ);
                 
-                let heightMultiplier = 0.8;
-                if (biome === 'mountains') heightMultiplier = 2.0;
-                else if (biome === 'ice' || biome === 'tundra') heightMultiplier = 1.3;
-                else if (biome === 'taiga') heightMultiplier = 1.0;
-                else if (biome === 'desert') heightMultiplier = 0.6;
-                else if (biome === 'plains') heightMultiplier = 0.4;
-                else if (biome === 'forest' || biome === 'jungle') heightMultiplier = 0.8;
-                else if (biome === 'savanna') heightMultiplier = 0.5;
-                else if (biome === 'swamp') heightMultiplier = 0.3;
+                let heightMultiplier = 1.2;
+                if (biome === 'mountains') heightMultiplier = 3.0;
+                else if (biome === 'ice' || biome === 'tundra') heightMultiplier = 2.0;
+                else if (biome === 'taiga') heightMultiplier = 1.5;
+                else if (biome === 'desert') heightMultiplier = 1.0;
+                else if (biome === 'plains') heightMultiplier = 0.6;
+                else if (biome === 'forest' || biome === 'jungle') heightMultiplier = 1.4;
+                else if (biome === 'savanna') heightMultiplier = 0.8;
+                else if (biome === 'swamp') heightMultiplier = 0.5;
                 
-                const height = (noise1 + noise2 + noise3) * heightMultiplier;
-                const surfaceY = Math.floor(height * 2);
+                const height = (noise1 + noise2 + noise3 + noise4) * heightMultiplier;
+                const surfaceY = Math.round(height * 2.5); // Round instead of floor for smoother terrain
                 
                 const heightVariation = (height + 3) / 6;
                 const surfaceColor = this.getBiomeColor(biome, heightVariation);
                 
-                const bedrockLevel = -6;
+                const bedrockLevel = -60; // Bottom of the world
+                const bedrockTop = -55;    // Bedrock layer thickness
                 const seaLevel = 0;
                 
-                // Fill voxel column
-                for (let y = bedrockLevel; y <= Math.max(surfaceY, seaLevel); y++) {
+                // Fill from bedrock to surface (NOT forcing to sea level)
+                const maxY = surfaceY;
+                
+                for (let y = bedrockLevel; y <= maxY; y++) {
                     const depthFromSurface = surfaceY - y;
                     let voxelType, voxelColor, material;
                     
-                    if (y > surfaceY) {
+                    // Bedrock layer at bottom (ALWAYS solid, no exceptions)
+                    if (y <= bedrockTop) {
+                        voxelType = 'terrain';
+                        voxelColor = [0.15, 0.15, 0.15];
+                        material = Materials.BEDROCK;
+                    }
+                    else if (y > surfaceY) {
                         // Water above terrain
                         if (y <= seaLevel) {
                             voxelType = 'water';
@@ -574,19 +724,31 @@ class Game {
                         }
                     } else {
                         // Solid terrain
-                        // Improved 3D cave noise for more organic branch caves
-                        const caveNoise1 = Math.sin(worldX * 0.2 + y * 0.3 + this.worldSeed) * 
-                                          Math.cos(worldZ * 0.2 + y * 0.3 + this.worldSeed * 2);
-                        const caveNoise2 = Math.sin(worldX * 0.15 + y * 0.4 + this.worldSeed * 3) * 
-                                          Math.cos(worldZ * 0.15 + y * 0.4 + this.worldSeed * 4);
-                        const caveNoise3 = Math.sin(worldX * 0.25 + y * 0.2 + this.worldSeed * 5) * 
-                                          Math.cos(worldZ * 0.25 + y * 0.2 + this.worldSeed * 6);
+                        // Multi-layered cave system with tall chambers and branching tunnels
+                        // Main cave chambers (very low Y frequency for tall vertical spaces)
+                        const caveNoise1 = Math.sin(worldX * 0.06 + y * 0.03 + this.worldSeed) * 
+                                          Math.cos(worldZ * 0.06 + y * 0.03 + this.worldSeed * 2);
                         
-                        const combinedCaveNoise = (caveNoise1 + caveNoise2 * 0.5 + caveNoise3 * 0.3) / 1.8;
-                        // Bedrock layer is never a cave
-                        const isCave = y !== bedrockLevel && combinedCaveNoise > 0.7 && y < surfaceY - 5 && y > bedrockLevel + 3;
+                        // Medium branches (low Y frequency for walkable height)
+                        const caveNoise2 = Math.sin(worldX * 0.12 + y * 0.05 + this.worldSeed * 3) * 
+                                          Math.cos(worldZ * 0.12 + y * 0.05 + this.worldSeed * 4);
+                        
+                        // Small tunnels (still tall enough to walk through)
+                        const caveNoise3 = Math.sin(worldX * 0.15 + y * 0.04 + this.worldSeed * 5) * 
+                                          Math.cos(worldZ * 0.15 + y * 0.04 + this.worldSeed * 6);
+                        
+                        // Additional layer for more branching variety
+                        const caveNoise4 = Math.sin(worldX * 0.1 + y * 0.06 + worldZ * 0.08 + this.worldSeed * 7) * 
+                                          Math.cos(worldZ * 0.11 + y * 0.06 + worldX * 0.09 + this.worldSeed * 8);
+                        
+                        // Combine all layers - weighted to create main chambers with branching tunnels
+                        const combinedCaveNoise = (caveNoise1 * 0.6 + caveNoise2 * 0.5 + caveNoise3 * 0.4 + caveNoise4 * 0.3) / 1.8;
+                        
+                        // Caves can reach surface, but not in bedrock layer
+                        const isCave = y > bedrockTop + 3 && combinedCaveNoise > 0.35 && y > bedrockLevel + 8;
                         
                         if (!isCave) {
+                            // Solid terrain
                             voxelType = 'terrain';
                             
                             // Ore generation based on depth
@@ -662,18 +824,21 @@ class Game {
                                 }
                             }
                         }
-                        voxelGrid[x][z][y + 6] = { material: material, color: voxelColor, type: voxelType };
+                        voxelGrid[x][z][y + 60] = { material: material, color: voxelColor, type: voxelType };
                     }
                 }
             }
         }
         
+        // Flood fill water into caves below sea level (seaLevel is always 0)
+        this.floodFillWater(voxelGrid, this.chunkSize, 0);
+        
         // Use greedy meshing to generate optimized render cubes
         chunkCubes = this.greedyMesher(voxelGrid, chunkX, chunkZ, key);
         
-        if (chunkCubes.length === 0) {
-            console.warn(`Chunk ${key} generated 0 cubes!`);
-        }
+        // if (chunkCubes.length === 0) {
+        //     console.warn(`Chunk ${key} generated 0 cubes!`);
+        // }
         
         // Generate features based on biome
         this.generateChunkFeatures(chunkX, chunkZ, chunkCubes, key);
@@ -688,10 +853,10 @@ class Game {
         this.cubes.push(...chunkCubes);
         
         // Log optimization stats
-        const mergedCount = chunkCubes.filter(c => c.merged).length;
-        if (mergedCount > 0) {
-            console.log(`Chunk ${key}: ${chunkCubes.length} cubes (${mergedCount} merged)`);
-        }
+        // const mergedCount = chunkCubes.filter(c => c.merged).length;
+        // if (mergedCount > 0) {
+        //     console.log(`Chunk ${key}: ${chunkCubes.length} cubes (${mergedCount} merged)`);
+        // }
     }
 
     generateChunkFeatures(chunkX, chunkZ, chunkCubes, key) {
@@ -716,8 +881,8 @@ class Game {
             
             // Biome-specific features
             if (biome === 'forest' || biome === 'jungle') {
-                // Trees
-                if (rand < 0.7) {
+                // Trees - don't spawn in water
+                if (rand < 0.7 && terrainHeight > 0) {
                     const treeHeight = 2 + this.seededRandom(worldX, worldZ, this.worldSeed + 900) * 3;
                     const isFantasy = this.seededRandom(worldX, worldZ, this.worldSeed + 1100) > 0.6;
                     
@@ -873,6 +1038,10 @@ class Game {
             
             treePositions.push({ x, z });
             const terrainInfo = getTerrainInfo(x, z);
+            
+            // Don't spawn trees in water
+            if (terrainInfo.height <= 0) continue;
+            
             const treeHeight = 2 + Math.random() * 3;
             const treeType = Math.random();
             
@@ -1188,17 +1357,67 @@ class Game {
             }
         }
 
-        // Jumping
-        if (this.keys[' '] && this.player.onGround) {
-            this.player.velocity[1] = this.player.jumpSpeed;
-            this.player.onGround = false;
+        // Jumping and swimming
+        const isInWater = this.isPlayerInWater();
+        
+        if (isInWater) {
+            // Swimming mechanics
+            if (this.keys[' ']) {
+                // Swim up
+                this.player.velocity[1] = 0.3;
+            } else {
+                // Slow fall in water
+                this.player.velocity[1] -= 0.003 * dt;
+            }
+            // Limit sink speed
+            if (this.player.velocity[1] < -0.2) {
+                this.player.velocity[1] = -0.2;
+            }
+        } else {
+            // Normal jumping on ground
+            if (this.keys[' '] && this.player.onGround) {
+                this.player.velocity[1] = this.player.jumpSpeed;
+                this.player.onGround = false;
+            }
+            
+            // Normal gravity
+            if (!this.player.onGround) {
+                this.player.velocity[1] -= 0.01 * dt;
+            }
         }
-
-        // Gravity
-        if (!this.player.onGround) {
-            this.player.velocity[1] -= 0.01 * dt;
-        }
+        
+        // Store old Y for ceiling collision
+        const oldY = this.player.position[1];
         this.player.position[1] += this.player.velocity[1] * dt;
+        
+        // Ceiling collision - check for blocks above player's head
+        const playerHeight = 1.8;
+        const headCheckRadius = 0.5;
+        const headY = this.player.position[1] + playerHeight / 2;
+        
+        for (let cube of this.cubes) {
+            if (cube.material && !cube.material.transparent) {
+                const cubeMinY = cube.position[1] - cube.scale[1] / 2;
+                const cubeMaxY = cube.position[1] + cube.scale[1] / 2;
+                const cubeMinX = cube.position[0] - cube.scale[0] / 2;
+                const cubeMaxX = cube.position[0] + cube.scale[0] / 2;
+                const cubeMinZ = cube.position[2] - cube.scale[2] / 2;
+                const cubeMaxZ = cube.position[2] + cube.scale[2] / 2;
+                
+                // Check if player's head is colliding with block from below
+                if (headY > cubeMinY && headY < cubeMaxY) {
+                    if (this.player.position[0] + headCheckRadius > cubeMinX && 
+                        this.player.position[0] - headCheckRadius < cubeMaxX &&
+                        this.player.position[2] + headCheckRadius > cubeMinZ && 
+                        this.player.position[2] - headCheckRadius < cubeMaxZ) {
+                        // Hit ceiling, stop upward movement and position player below block
+                        this.player.position[1] = cubeMinY - playerHeight / 2 - 0.01;
+                        this.player.velocity[1] = 0;
+                        break;
+                    }
+                }
+            }
+        }
 
         // Ground collision - check for solid blocks below player
         let foundGround = false;
@@ -1264,6 +1483,14 @@ class Game {
             }
         } else {
             this.player.onGround = false;
+        }
+        
+        // Absolute floor at bedrock level (prevent falling through world)
+        const bedrockFloor = -55 * 0.5; // Convert to world coordinates
+        if (this.player.position[1] < bedrockFloor) {
+            this.player.position[1] = bedrockFloor;
+            this.player.velocity[1] = 0;
+            this.player.onGround = true;
         }
 
         // Update enemies
@@ -1333,27 +1560,24 @@ class Game {
         const noise1 = Math.sin(x * 0.1 + this.worldSeed) * Math.cos(z * 0.1 + this.worldSeed);
         const noise2 = Math.sin(x * 0.05 + this.worldSeed * 2) * Math.cos(z * 0.05 + this.worldSeed * 2) * 1.5;
         const noise3 = Math.sin(x * 0.02 + this.worldSeed * 3) * Math.cos(z * 0.02 + this.worldSeed * 3) * 2;
+        const noise4 = Math.sin(x * 0.15 + this.worldSeed * 4) * Math.cos(z * 0.15 + this.worldSeed * 4) * 0.5;
         
         const biome = this.getBiome(x, z);
         
-        let heightMultiplier = 0.8;
-        if (biome === 'ice' || biome === 'tundra') {
-            heightMultiplier = 1.3;
-        } else if (biome === 'desert') {
-            heightMultiplier = 0.6;
-        } else if (biome === 'plains') {
-            heightMultiplier = 0.4;
-        } else if (biome === 'forest' || biome === 'jungle') {
-            heightMultiplier = 0.8;
-        } else if (biome === 'savanna') {
-            heightMultiplier = 0.5;
-        } else if (biome === 'swamp') {
-            heightMultiplier = 0.3;
-        }
+        let heightMultiplier = 1.2;
+        if (biome === 'mountains') heightMultiplier = 3.0;
+        else if (biome === 'ice' || biome === 'tundra') heightMultiplier = 2.0;
+        else if (biome === 'taiga') heightMultiplier = 1.5;
+        else if (biome === 'desert') heightMultiplier = 1.0;
+        else if (biome === 'plains') heightMultiplier = 0.6;
+        else if (biome === 'forest' || biome === 'jungle') heightMultiplier = 1.4;
+        else if (biome === 'savanna') heightMultiplier = 0.8;
+        else if (biome === 'swamp') heightMultiplier = 0.5;
         
-        const height = (noise1 + noise2 + noise3) * heightMultiplier;
+        const height = (noise1 + noise2 + noise3 + noise4) * heightMultiplier;
+        const surfaceY = Math.round(height * 2.5);
         
-        return Math.floor(height) * 0.5 - 1;
+        return surfaceY * 0.5;
     }
 
     updateEnemies(deltaTime) {
